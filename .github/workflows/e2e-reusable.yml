@@ -67,7 +67,10 @@ jobs:
       - name: Install dependencies
         env:
           NODE_AUTH_TOKEN: ${{ github.token }}
-        run: npm install
+        run: |
+          npm cache clean --force 2>/dev/null || true
+          rm -rf node_modules
+          npm install --prefer-online
 
       - name: Install Playwright
         run: npx playwright install --with-deps chromium
