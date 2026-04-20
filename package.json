@@ -1,6 +1,6 @@
 {
   "name": "@passage-protocol/e2e-helpers",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Shared Playwright E2E test helpers for prod-puller services",
   "type": "module",
   "exports": {
