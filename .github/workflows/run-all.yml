@@ -1,0 +1,99 @@
+name: Run All E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - test
+          - staging
+  schedule:
+    - cron: "0 3 * * *"
+
+jobs:
+  determine-urls:
+    name: Resolve service URLs
+    runs-on: ubuntu-latest
+    outputs:
+      gateway_url: ${{ steps.urls.outputs.gateway_url }}
+      user_url: ${{ steps.urls.outputs.user_url }}
+      scorecard_url: ${{ steps.urls.outputs.scorecard_url }}
+      claws_url: ${{ steps.urls.outputs.claws_url }}
+      context_url: ${{ steps.urls.outputs.context_url }}
+      cockpit_url: ${{ steps.urls.outputs.cockpit_url }}
+      agent_url: ${{ steps.urls.outputs.agent_url }}
+      worker_url: ${{ steps.urls.outputs.worker_url }}
+    steps:
+      - name: Set URLs based on environment
+        id: urls
+        run: |
+          ENV="${{ inputs.environment || 'test' }}"
+          if [ "$ENV" = "staging" ]; then
+            BASE="https://staging-gateway.mypuller.com"
+          else
+            BASE="https://test-gateway.mypuller.com"
+          fi
+          echo "gateway_url=${BASE}" >> "$GITHUB_OUTPUT"
+          echo "user_url=${BASE}/user" >> "$GITHUB_OUTPUT"
+          echo "scorecard_url=${BASE}/scorecard" >> "$GITHUB_OUTPUT"
+          echo "claws_url=${BASE}/claws" >> "$GITHUB_OUTPUT"
+          echo "context_url=${BASE}/context" >> "$GITHUB_OUTPUT"
+          echo "cockpit_url=${BASE}/cockpit" >> "$GITHUB_OUTPUT"
+          echo "agent_url=${BASE}/agent" >> "$GITHUB_OUTPUT"
+          echo "worker_url=${BASE}/worker" >> "$GITHUB_OUTPUT"
+
+  trigger-repos:
+    name: Trigger E2E
+    runs-on: ubuntu-latest
+    needs: determine-urls
+    permissions:
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: prod-puller-user
+            service_url_output: user_url
+          - repo: prod-puller-scorecard
+            service_url_output: scorecard_url
+          - repo: prod-puller-claws
+            service_url_output: claws_url
+          - repo: prod-puller-nexus-gateway
+            service_url_output: gateway_url
+          - repo: prod-puller-context
+            service_url_output: context_url
+          - repo: prod-puller-cockpit
+            service_url_output: cockpit_url
+          - repo: prod-puller-agent
+            service_url_output: agent_url
+          - repo: prod-puller-nexus-worker
+            service_url_output: worker_url
+    steps:
+      - name: Trigger E2E workflow
+        env:
+          GH_TOKEN: ${{ secrets.CROSS_REPO_PAT }}
+        run: |
+          SERVICE_URL="${{ needs.determine-urls.outputs[matrix.service_url_output] }}"
+          echo "Triggering ${{ matrix.repo }} with service_url=$SERVICE_URL"
+          gh workflow run e2e.yml \
+            --repo passage-protocol/${{ matrix.repo }} \
+            -f service_url="$SERVICE_URL"
+
+  collect-results:
+    name: Summary
+    runs-on: ubuntu-latest
+    needs: trigger-repos
+    if: always()
+    steps:
+      - name: Report status
+        run: |
+          echo "## E2E Run Complete"
+          echo ""
+          echo "Environment: ${{ inputs.environment || 'test' }}"
+          echo "Trigger status: ${{ needs.trigger-repos.result }}"
+          echo ""
+          echo "Check individual repo workflow runs for detailed results."
+          echo "All repos were triggered in parallel via workflow_dispatch."
