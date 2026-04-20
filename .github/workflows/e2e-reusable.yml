@@ -69,8 +69,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ github.token }}
         run: |
           npm cache clean --force 2>/dev/null || true
-          rm -rf node_modules
-          npm install --prefer-online
+          rm -rf node_modules package-lock.json
+          npm install --no-cache
 
       - name: Install Playwright
         run: npx playwright install --with-deps chromium
