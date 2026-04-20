@@ -1,0 +1,56 @@
+import { test, expect } from "./fixture.js";
+import { apiGet, waitForHealthy } from "./index.js";
+
+interface HealthSuiteOptions {
+  /** Validate that the readiness body includes expected fields */
+  validateReadinessBody?: boolean;
+  /** Service name to check in readiness response */
+  serviceName?: string;
+  /** Custom liveness path (default: /health) */
+  livenessPath?: string;
+  /** Custom readiness path (default: /health/ready) */
+  readinessPath?: string;
+  /** Timeout for waitForHealthy (default: 30000ms) */
+  healthTimeout?: number;
+}
+
+/**
+ * Generates a standard health check test suite for a service.
+ * Includes liveness, readiness, and startup health wait tests.
+ */
+export function describeHealthSuite(
+  serviceName: string,
+  options: HealthSuiteOptions = {},
+) {
+  const {
+    validateReadinessBody = false,
+    livenessPath = "/health",
+    readinessPath = "/health/ready",
+    healthTimeout = 30_000,
+  } = options;
+
+  test.describe(`${serviceName} - Health`, () => {
+    test("liveness endpoint returns 200", async ({ api }) => {
+      const { status, body } = await apiGet(api, livenessPath);
+      expect(status).toBe(200);
+      expect(body).toBeDefined();
+    });
+
+    test("readiness endpoint returns 200", async ({ api }) => {
+      const { status, body } = await apiGet(api, readinessPath);
+      expect(status).toBe(200);
+
+      if (validateReadinessBody && body && typeof body === "object") {
+        const b = body as Record<string, unknown>;
+        if (options.serviceName) {
+          expect(b["service"]).toBe(options.serviceName);
+        }
+        expect(b["status"]).toBeDefined();
+      }
+    });
+
+    test("service becomes healthy within timeout", async ({ api }) => {
+      await waitForHealthy(api, livenessPath, { timeout: healthTimeout });
+    });
+  });
+}
