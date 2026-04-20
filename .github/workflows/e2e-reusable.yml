@@ -1,0 +1,104 @@
+name: E2E Reusable
+
+on:
+  workflow_call:
+    inputs:
+      service_url:
+        description: "Service URL to test against (overrides E2E_SERVICE_URL secret)"
+        required: false
+        type: string
+        default: ""
+      working_directory:
+        description: "Working directory for e2e tests"
+        required: false
+        type: string
+        default: "e2e"
+      node_version:
+        description: "Node.js version"
+        required: false
+        type: string
+        default: "20"
+      timeout_minutes:
+        description: "Job timeout in minutes"
+        required: false
+        type: number
+        default: 15
+    secrets:
+      E2E_SERVICE_URL:
+        required: false
+      E2E_API_KEY:
+        required: false
+      E2E_TENANT_NAME:
+        required: false
+      E2E_TENANT_ID:
+        required: false
+      DEV_TOKEN:
+        required: false
+
+jobs:
+  e2e:
+    name: Playwright E2E
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    env:
+      E2E_SERVICE_URL: ${{ inputs.service_url || secrets.E2E_SERVICE_URL }}
+      E2E_API_KEY: ${{ secrets.E2E_API_KEY }}
+      E2E_TENANT_NAME: ${{ secrets.E2E_TENANT_NAME }}
+      E2E_TENANT_ID: ${{ secrets.E2E_TENANT_ID }}
+      DEV_TOKEN: ${{ secrets.DEV_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Configure git auth for private packages
+        run: git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: npm install
+
+      - name: Install Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Run E2E tests
+        run: npx playwright test
+
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: ${{ inputs.working_directory }}/playwright-report/
+          retention-days: 14
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: test-results-${{ github.run_id }}
+          path: ${{ inputs.working_directory }}/test-results/
+          retention-days: 7
+
+      - name: Post PR comment on failure
+        if: failure() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: e2e-results
+          message: |
+            ## E2E Tests Failed
+
+            Playwright E2E tests failed on this PR. Check the [test report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+
+            Download the HTML report from the artifacts for detailed failure analysis with traces and screenshots.
