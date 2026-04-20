@@ -5,6 +5,8 @@ import { type APIRequestContext } from "@playwright/test";
  *
  * Environment variables:
  * - E2E_SERVICE_URL: Base URL for the service (default: http://localhost:3000)
+ *   If the URL has a path component (e.g. https://gateway/user), the path
+ *   prefix is preserved and prepended to all request paths.
  * - E2E_API_KEY: Optional API key sent as X-API-Key header
  * - E2E_TENANT_NAME: Optional tenant name sent as X-Tenant header
  * - DEV_TOKEN: Optional Bearer token for Authorization header
