@@ -1,0 +1,150 @@
+name: Validate Generated Tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tests/**"
+
+jobs:
+  validate:
+    name: Run Generated Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: user
+            service_url_output: user_url
+          - service: scorecard
+            service_url_output: scorecard_url
+          - service: claws
+            service_url_output: claws_url
+          - service: context
+            service_url_output: context_url
+          - service: cockpit
+            service_url_output: cockpit_url
+          - service: agent
+            service_url_output: agent_url
+          - service: worker
+            service_url_output: worker_url
+          - service: gateway
+            service_url_output: gateway_url
+
+    env:
+      E2E_GATEWAY_URL: https://test-gateway.mypuller.com
+      E2E_API_KEY: ${{ secrets.E2E_API_KEY }}
+      E2E_TENANT_NAME: ${{ secrets.E2E_TENANT_NAME }}
+      DEV_TOKEN: ${{ secrets.DEV_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for changed tests
+        id: changes
+        run: |
+          CHANGED=$(git diff --name-only origin/main...HEAD -- "tests/${{ matrix.service }}/" 2>/dev/null || true)
+          if [ -z "$CHANGED" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Changed files:"
+            echo "$CHANGED"
+          fi
+
+      - name: Skip if no tests changed for this service
+        if: steps.changes.outputs.skip == 'true'
+        run: echo "No test changes for ${{ matrix.service }}, skipping"
+
+      - uses: actions/setup-node@v4
+        if: steps.changes.outputs.skip != 'true'
+        with:
+          node-version: "20"
+
+      - name: Configure git auth for private packages
+        if: steps.changes.outputs.skip != 'true'
+        run: git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install dependencies
+        if: steps.changes.outputs.skip != 'true'
+        working-directory: tests
+        run: npm install
+
+      - name: Install Playwright
+        if: steps.changes.outputs.skip != 'true'
+        working-directory: tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Run tests
+        if: steps.changes.outputs.skip != 'true'
+        working-directory: tests
+        env:
+          E2E_SERVICE_NAME: ${{ matrix.service }}
+        run: npx playwright test --project=${{ matrix.service }}
+
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.changes.outputs.skip != 'true' }}
+        with:
+          name: playwright-report-${{ matrix.service }}-${{ github.run_id }}
+          path: tests/playwright-report/
+          retention-days: 14
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.changes.outputs.skip != 'true' }}
+        with:
+          name: test-results-${{ matrix.service }}-${{ github.run_id }}
+          path: tests/test-results/
+          retention-days: 7
+
+      - name: Post PR comment on failure
+        if: failure() && steps.changes.outputs.skip != 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: e2e-validate-${{ matrix.service }}
+          message: |
+            ## E2E Validation Failed — ${{ matrix.service }}
+
+            Generated tests for **${{ matrix.service }}** failed validation against the test environment.
+
+            [View test report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+            This may indicate the generated tests need manual adjustment before merging.
+
+      - name: Post PR comment on success
+        if: success() && steps.changes.outputs.skip != 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: e2e-validate-${{ matrix.service }}
+          message: |
+            ## E2E Validation Passed — ${{ matrix.service }}
+
+            Generated tests for **${{ matrix.service }}** passed against the test environment.
+
+      - name: Report result to testgen API
+        if: always() && steps.changes.outputs.skip != 'true'
+        env:
+          TESTGEN_API_URL: ${{ secrets.TESTGEN_API_URL }}
+          TESTGEN_API_KEY: ${{ secrets.TESTGEN_API_KEY }}
+        run: |
+          if [ -z "$TESTGEN_API_URL" ]; then exit 0; fi
+
+          RUN_ID=$(echo "${{ github.head_ref }}" | grep -oP 'testgen/[^/]+/\K.*' || true)
+          if [ -z "$RUN_ID" ]; then exit 0; fi
+
+          STATUS="passed"
+          if [ "${{ job.status }}" != "success" ]; then
+            STATUS="failed"
+          fi
+
+          curl -s -X POST "${TESTGEN_API_URL}/runs/${RUN_ID}/result" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${TESTGEN_API_KEY}" \
+            -d "{\"status\": \"${STATUS}\"}" || true

@@ -1,0 +1,241 @@
+name: E2E Test Generation (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: "Service name (e.g. prod-puller-user)"
+        required: true
+        type: string
+      gateway_path:
+        description: "Gateway path prefix (e.g. /user)"
+        required: true
+        type: string
+      testgen_api_url:
+        description: "Testgen Lambda API URL (overrides default)"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      TESTGEN_API_KEY:
+        required: true
+      CROSS_REPO_PAT:
+        required: true
+
+jobs:
+  generate:
+    name: Generate E2E Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout service repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Collect diff
+        id: diff
+        run: |
+          git diff HEAD~1..HEAD > /tmp/commit.diff
+          echo "diff_size=$(wc -c < /tmp/commit.diff)" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if no meaningful diff
+        if: steps.diff.outputs.diff_size == '0'
+        run: |
+          echo "No diff found, skipping test generation"
+          exit 0
+
+      - name: Read manifest
+        id: manifest
+        run: |
+          if [ -f "e2e/testgen-manifest.json" ]; then
+            echo "manifest_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "manifest_exists=false" >> "$GITHUB_OUTPUT"
+            echo '{}' > /tmp/manifest.json
+          fi
+
+      - name: Checkout test harness
+        uses: actions/checkout@v4
+        with:
+          repository: passage-protocol/prod-puller-test-harness
+          token: ${{ secrets.CROSS_REPO_PAT }}
+          path: test-harness
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Collect existing tests
+        id: existing
+        run: |
+          SERVICE_SHORT=$(echo "${{ inputs.service_name }}" | sed 's/^prod-puller-//')
+          TEST_DIR="test-harness/tests/${SERVICE_SHORT}"
+          if [ -d "$TEST_DIR" ]; then
+            echo "existing_tests_dir=$TEST_DIR" >> "$GITHUB_OUTPUT"
+          else
+            mkdir -p "$TEST_DIR"
+            echo "existing_tests_dir=$TEST_DIR" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build API payload
+        id: payload
+        run: |
+          MANIFEST_FILE="e2e/testgen-manifest.json"
+          if [ ! -f "$MANIFEST_FILE" ]; then
+            MANIFEST_FILE="/tmp/manifest.json"
+          fi
+
+          COMMIT_MSG=$(git log -1 --pretty=%B | head -1)
+          COMMIT_SHA=$(git rev-parse HEAD)
+
+          # Build JSON payload
+          jq -n \
+            --arg service "${{ inputs.service_name }}" \
+            --arg gatewayPath "${{ inputs.gateway_path }}" \
+            --rawfile diff /tmp/commit.diff \
+            --arg commitMessage "$COMMIT_MSG" \
+            --arg commitSha "$COMMIT_SHA" \
+            --slurpfile manifest "$MANIFEST_FILE" \
+            '{
+              service: $service,
+              gatewayPath: $gatewayPath,
+              diff: $diff,
+              commitMessage: $commitMessage,
+              commitSha: $commitSha,
+              manifest: $manifest[0],
+              existingTests: [],
+              helperSignatures: ""
+            }' > /tmp/payload.json
+
+      - name: Call testgen API
+        id: generate
+        env:
+          TESTGEN_API_URL: ${{ inputs.testgen_api_url || format('https://testgen-api-{0}.mypuller.com', 'test') }}
+          TESTGEN_API_KEY: ${{ secrets.TESTGEN_API_KEY }}
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST "${TESTGEN_API_URL}/generate" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${TESTGEN_API_KEY}" \
+            -d @/tmp/payload.json)
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Testgen API returned $HTTP_CODE"
+            echo "$BODY"
+            exit 1
+          fi
+
+          echo "$BODY" > /tmp/response.json
+
+          TESTS_COUNT=$(echo "$BODY" | jq '.tests | length')
+          RUN_ID=$(echo "$BODY" | jq -r '.runId')
+          echo "tests_count=$TESTS_COUNT" >> "$GITHUB_OUTPUT"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if no tests generated
+        if: steps.generate.outputs.tests_count == '0'
+        run: |
+          echo "No tests generated for this commit"
+          exit 0
+
+      - name: Write generated test files
+        if: steps.generate.outputs.tests_count != '0'
+        run: |
+          cd test-harness
+
+          # Write each generated test file
+          TESTS_COUNT=$(jq '.tests | length' /tmp/response.json)
+          for i in $(seq 0 $(($TESTS_COUNT - 1))); do
+            FILENAME=$(jq -r ".tests[$i].filename" /tmp/response.json)
+            CONTENT=$(jq -r ".tests[$i].content" /tmp/response.json)
+
+            mkdir -p "tests/$(dirname "$FILENAME")"
+            echo "$CONTENT" > "tests/$FILENAME"
+            echo "Wrote tests/$FILENAME"
+          done
+
+      - name: Create PR
+        if: steps.generate.outputs.tests_count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.CROSS_REPO_PAT }}
+        run: |
+          cd test-harness
+
+          SERVICE_SHORT=$(echo "${{ inputs.service_name }}" | sed 's/^prod-puller-//')
+          COMMIT_SHA="${{ github.sha }}"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          BRANCH="testgen/${SERVICE_SHORT}/${SHORT_SHA}"
+
+          git config user.name "testgen-bot"
+          git config user.email "testgen-bot@passage-protocol.dev"
+
+          git checkout -b "$BRANCH"
+          git add tests/
+          git commit -m "$(cat <<EOF
+          test(${SERVICE_SHORT}): auto-generated E2E tests
+
+          Service: ${{ inputs.service_name }}
+          Commit: ${COMMIT_SHA}
+          Run ID: ${{ steps.generate.outputs.run_id }}
+          Tests: ${{ steps.generate.outputs.tests_count }} file(s)
+
+          $(jq -r '.summary' /tmp/response.json)
+          EOF
+          )"
+
+          git push origin "$BRANCH"
+
+          CONFIDENCE=$(jq -r '.confidence' /tmp/response.json)
+          SUMMARY=$(jq -r '.summary' /tmp/response.json)
+
+          PR_URL=$(gh pr create \
+            --title "test(${SERVICE_SHORT}): auto-generated E2E tests for ${SHORT_SHA}" \
+            --body "$(cat <<EOF
+          ## Auto-Generated E2E Tests
+
+          **Service:** \`${{ inputs.service_name }}\`
+          **Commit:** [\`${SHORT_SHA}\`](https://github.com/passage-protocol/${{ inputs.service_name }}/commit/${COMMIT_SHA})
+          **Confidence:** ${CONFIDENCE}
+          **Run ID:** \`${{ steps.generate.outputs.run_id }}\`
+
+          ### Summary
+          ${SUMMARY}
+
+          ### Generated Files
+          $(jq -r '.tests[] | "- `\(.filename)` — \(.description)"' /tmp/response.json)
+
+          ---
+          *Auto-generated by the testgen pipeline. Review before merging.*
+          EOF
+          )" \
+            --label "auto-generated,e2e-tests" \
+            2>/dev/null || true)
+
+          echo "PR created: $PR_URL"
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Report result to testgen API
+        if: always() && steps.generate.outputs.run_id
+        env:
+          TESTGEN_API_URL: ${{ inputs.testgen_api_url || format('https://testgen-api-{0}.mypuller.com', 'test') }}
+          TESTGEN_API_KEY: ${{ secrets.TESTGEN_API_KEY }}
+        run: |
+          RUN_ID="${{ steps.generate.outputs.run_id }}"
+          STATUS="pr_opened"
+          if [ "${{ steps.generate.outputs.tests_count }}" = "0" ]; then
+            STATUS="no_tests"
+          fi
+
+          curl -s -X POST "${TESTGEN_API_URL}/runs/${RUN_ID}/result" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${TESTGEN_API_KEY}" \
+            -d "{\"status\": \"${STATUS}\"}" || true

@@ -1,0 +1,22 @@
+{
+  "name": "@passage-protocol/e2e-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Central E2E test suite for all prod-puller services",
+  "type": "module",
+  "scripts": {
+    "test": "npx playwright test",
+    "test:user": "E2E_SERVICE_NAME=user npx playwright test --project=user",
+    "test:scorecard": "E2E_SERVICE_NAME=scorecard npx playwright test --project=scorecard",
+    "test:claws": "E2E_SERVICE_NAME=claws npx playwright test --project=claws",
+    "test:context": "E2E_SERVICE_NAME=context npx playwright test --project=context",
+    "test:cockpit": "E2E_SERVICE_NAME=cockpit npx playwright test --project=cockpit",
+    "test:agent": "E2E_SERVICE_NAME=agent npx playwright test --project=agent",
+    "test:worker": "E2E_SERVICE_NAME=worker npx playwright test --project=worker",
+    "test:gateway": "E2E_SERVICE_NAME=gateway npx playwright test --project=gateway"
+  },
+  "dependencies": {
+    "@passage-protocol/e2e-helpers": "git+https://github.com/passage-protocol/prod-puller-test-harness.git",
+    "@playwright/test": "^1.59.1"
+  }
+}
