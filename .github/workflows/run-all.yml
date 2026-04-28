@@ -74,8 +74,12 @@ jobs:
     steps:
       - name: Trigger E2E workflow
         env:
-          GH_TOKEN: ${{ secrets.CROSS_REPO_PAT }}
+          GH_TOKEN: ${{ secrets.CROSS_REPO_PAT || secrets.GH_PAT || github.token }}
         run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::No token available. Set CROSS_REPO_PAT (or GH_PAT) with 'workflow' scope in repo secrets."
+            exit 1
+          fi
           SERVICE_URL="${{ needs.determine-urls.outputs[matrix.service_url_output] }}"
           echo "Triggering ${{ matrix.repo }} with service_url=$SERVICE_URL"
           gh workflow run e2e.yml \
